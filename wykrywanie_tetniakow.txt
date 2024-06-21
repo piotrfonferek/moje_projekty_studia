@@ -1,0 +1,123 @@
+Nie wiem, czy mogę udostępniać wyniki naszego projektu dotyczącego projektu, ponieważ jesteśmy zobowiązani do nieudostępniania danych. Za to w tym pliku wrzucę parę przykładowych kodów, których używałem do czyszczenia danych z plików .csv w Python. Projekt jest cały czas robimy, więc kontakt z Pythonem mam na bieżąco i, wraz z R, najlepiej go pamiętam. Korzystałem głównie z biblioteki pandas. Są to głównie komendy typu .isin, .iloc, proste pętle for. Kody poniżej nie tworzą jakieś spójnej całości, są to kody typowo "robocze" pisane przy użyciu ChatGPT.
+
+Wybór danych wg. daty:
+zimne['miesiac_przed_wykryciem'] = zimne['DIAGNOZA-DATA_data'] - pd.DateOffset(months=1)
+
+# Przykładowy kod do stworzenia DataFrame "średnie_ewentualnie_ostatnie"
+średnie_ewentualnie_ostatnie = []
+
+
+# Grupowanie danych po 'id' i 'nazwa_badania'
+for (id_val, nazwa_badania), group in zimne.groupby(['PACJENT-ID', 'WYNIK LABORATORYJNY-NAZWA ATRYBUTU']):
+    # Filtracja danych z ostatniego miesiąca przed wykryciem
+    zimne_z_miesiaca = group[group['WYNIK LABORATORYJNY-DATA ZLECENIA'] >= group['miesiac_przed_wykryciem'].iloc[0]]
+    
+    if not zimne_z_miesiaca.empty:
+        # Obliczenie średniej dla wartości w ostatnim miesiącu przed wykryciem
+        średnia = zimne_z_miesiaca['WYNIK LABORATORYJNY-WARTOŚĆ'].mean()
+        data_badania = zimne_z_miesiaca['WYNIK LABORATORYJNY-DATA ZLECENIA'].max()
+    else:
+        # Jeśli nie ma wartości z ostatniego miesiąca przed wykryciem, wybierz najnowszą wartość badania
+        najnowsze_badanie = group.loc[group['WYNIK LABORATORYJNY-DATA ZLECENIA'].idxmax()]
+        średnia = najnowsze_badanie['WYNIK LABORATORYJNY-WARTOŚĆ']
+        data_badania = najnowsze_badanie['WYNIK LABORATORYJNY-DATA ZLECENIA']
+    
+    średnie_ewentualnie_ostatnie.append({
+        'PACJENT-ID': id_val,
+        'WYNIK LABORATORYJNY-NAZWA ATRYBUTU': nazwa_badania,
+        'średnia_wartość': średnia,
+        'WYNIK LABORATORYJNY-DATA ZLECENIA': data_badania
+    })
+
+# Konwersja listy do DataFrame
+średnie_ewentualnie_ostatnie_df = pd.DataFrame(średnie_ewentualnie_ostatnie)
+
+print(średnie_ewentualnie_ostatnie_df)
+
+####################################
+
+Filtrowanie danych wg. nazw badań z df badania:
+
+zgodnosc_badan = pd.DataFrame()
+dziadostwo = pd.DataFrame()
+
+for element in badania:
+    wartosc_do_wyszukania = element
+    badanie = sah_pw[sah_pw['WYNIK LABORATORYJNY-KOD ATRYBUTU'] == wartosc_do_wyszukania][['WYNIK LABORATORYJNY-KOD ATRYBUTU', 'WYNIK LABORATORYJNY-NAZWA ATRYBUTU', 'WYNIK LABORATORYJNY-NAZWA BADANIA', 'WYNIK LABORATORYJNY-JEDNOSTKA']]
+    zgodnosc_badan = zgodnosc_badan.append(badanie, ignore_index=True)
+    if any(badanie[column].nunique() > 1 for column in badanie.columns):
+        dziadostwo = dziadostwo.append(badanie, ignore_index=True)
+
+###################################
+
+Wykresy wyników badań:
+
+
+#metoda iqr
+def remove_outliers(series):
+    Q1 = series.quantile(0.25)
+    Q3 = series.quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - (3/2 * IQR)
+    upper_bound = Q3 + (3/2 * IQR)
+    return series[(series >= lower_bound) & (series <= upper_bound)]
+
+
+bialko_zimne = remove_outliers(bialko_zimne)
+bialko_sah = remove_outliers(bialko_sah)
+
+
+
+fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(12, 5))
+
+
+common_min = min(bialko_zimne.min(), bialko_sah.min())
+common_max = max(bialko_zimne.max(), bialko_sah.max())
+
+
+# Histogram dla pierwszej serii
+axes[0].hist(bialko_zimne, bins=15, density=True, edgecolor='black')
+axes[0].set_xlabel('Wartości serii 1')
+axes[0].set_ylabel('Częstotliwość')
+axes[0].set_title('Histogram bialko_zimne')
+axes[0].set_xlim(common_min, common_max)
+
+# Histogram dla drugiej serii
+axes[1].hist(bialko_sah, bins=15, density=True, edgecolor='black')
+axes[1].set_xlabel('Wartości serii 2')
+axes[1].set_ylabel('Częstotliwość')
+axes[1].set_title('Histogram bialko_sah')
+axes[1].set_xlim(common_min, common_max)
+
+# Wyświetlanie wykresów
+plt.tight_layout()
+plt.show()
+
+
+
+# Tworzenie dwuwymiarowego histogramu
+plt.figure(figsize=(8, 6))
+plt.hist2d(bialko_zimne_m['med_Białko C-reaktywne'], bialko_zimne_m['PACJENT-WIEK'], bins=[20, 20], cmap='Blues')
+plt.colorbar(label='Liczba wystąpień')
+plt.xlabel('Białko')
+plt.ylabel('Wiek')
+plt.title('Dwuwymiarowy histogram (2D histogram)')
+plt.show()
+
+
+
+#pairplot
+
+
+pair_plot = sns.pairplot(zimne,
+                         vars=['med_Białko C-reaktywne', 'med_INR', 'med_Sód', 'PACJENT-WIEK_kwadrat'], diag_kind='kde', kind='scatter', 
+                         height=2.5, aspect=1.2)
+plt.show()
+
+
+
+
+
+
+
+

@@ -1,0 +1,377 @@
+---
+title: "Projekt zaliczeniowy - statystyka"
+author: "Piotr Fonferek, s185514"
+format: html
+editor: visual
+---
+
+## Tematyka projektu
+
+W projekcie będę się zajmował analizą danych medycznych w celu przewidywania ryzyka udaru u pacjentów. Zbiór danych zawiera różnorodne informacje na temat pacjentów. Celem będzie opracowanie 3 modeli klasyfikacyjnych, które na podstawie tych danych będą próbować przewidzieć, czy pacjent ma ryzyko udaru czy nie.
+
+## Wczytanie i przygotowanie danych
+
+W zasadzie dane były czyste, jedynym problemem były braki danych w kolumnie BMI, które zastąpiłem medianą. Określiłem też typy zmiennych w każdej kolumnie.
+
+```{r}
+#wczytanie bibliotek
+
+library(tidyverse)
+library(palmerpenguins)
+library(readr)
+library(dplyr)
+library(dbplyr)
+library(dtplyr)
+library(caret)
+library(nortest)
+library(rlang)
+library(MASS)
+library(AICcmodavg)
+library(ggplot2)
+library(GGally)
+library(tree)
+library(rpart)
+library(readxl)
+library(rpart.plot)
+pacman::p_load(tidyverse, plotly, caret, tree, ipred, randomForest, adabag, gbm, xgboost, vip, pdp)
+```
+
+```{r}
+#wczytanie danych
+dane <- read_xlsx('dane_mediana.xlsx')
+dane <- subset(dane, select=-id)
+#definiowanie typów zmiennych
+dane$gender <- as.factor(dane$gender)
+dane$ever_married <- as.factor(dane$ever_married)
+dane$work_type <- factor(dane$work_type, levels = c("Self-employed", "Private", "Govt_job", "Never_worked","children"))
+dane$smoking_status <- factor(dane$smoking_status, levels = c("Unknown", "never smoked", "formerly smoked", "smokes"))
+dane$Residence_type <- factor(dane$Residence_type, levels = c("Urban", "Rural"))
+dane$hypertension <- as.numeric(dane$hypertension)
+dane$heart_disease <- as.numeric(dane$heart_disease)
+dane$stroke <- as.factor(dane$stroke)
+```
+
+## Uogólniony model liniowy - regresja logistyczna
+
+Pierwszym wybranym modelem jest model regresji logistycznej. Sprawdźmy jak będzie wyglądał, jeśli zbudujemy go na surowych danych.
+
+```{r}
+#podział danych na zbiór testowy i treningowy
+set.seed(213)
+train_index <- sample(1:nrow(dane), 0.75 * nrow(dane), replace = FALSE)
+data_train <- dane[train_index, ]
+data_test <- dane[-train_index, ]
+
+#budowa modelu 
+model_1 <- glm(
+  stroke ~ .,
+  data = data_train,
+  family = binomial(link = 'logit')
+)
+summary(model_1)
+
+#prognoza
+y_hat_prob <- predict(
+  model_1,
+  newdata = data_test,
+  type = 'response'
+)
+
+y_true <- data_test$stroke
+
+#klasyfikacja pacjenta jako chorego, jeśli szansa na udar wynosi więcej niż 0.5
+y_hat <- ifelse(y_hat_prob > 0.5, 1, 0)
+
+#Macierz kontyngencji
+confusionMatrix(as.factor(ifelse(y_hat_prob > 0.5, 1, 0)), data_test$stroke, positive = "1")
+
+```
+
+Krzywa ROC:
+
+```{r}
+roc = data.frame(
+  Threshold = seq(0, 1, by = 0.01)
+  , TPR = NA
+  , FPR = NA
+)
+
+for (i in 1:nrow(roc)) {
+  
+  y_hat_i = ifelse(y_hat_prob > roc$Threshold[i], 'Yes', 'No') %>%
+    as.factor()
+  
+  conf_matrix = table(y_true, y_hat_i) %>% as.matrix()
+  
+  roc$TPR[i] = conf_matrix[1, 1] / sum(conf_matrix[1, ])
+  roc$FPR[i] = conf_matrix[2, 1] / sum(conf_matrix[2, ])
+  
+}
+
+ggplot(roc, aes(x = FPR, y = TPR)) +
+  geom_line(size = 1) +
+  geom_abline(intercept = 0, slope = 1) +
+  ylim(c(0,1))
+
+pROC::auc(y_true, y_hat_prob)
+
+```
+
+Możemy zauważyć, że metryka Accuracy i AUC pod krzywą ROC tego modelu są bardzo dobre, ale wynika to z klasyfikowania wszystkich pacjentóW jako zdrowych. Jest to spowodowane brakiem balansu w zmiennej stroke - tylko 249 pacjentów ma udar z 5110 obserwacji. Spróbuję to poprawić przy użyciu parametru weights i znalezieniu optymalnej wagi.
+
+```{r}
+#ciąg wag do badania
+weights = seq(1, 100, by = 0.5)
+
+sensitivity <-c()
+sensitivity = numeric(length = length(weights))
+auc = numeric(length = length(weights))
+
+#pętla, która dla każdej wagi znajdzie auc i sensitivity modelu
+
+for (i in 1:length(weights)) {
+  
+  model = glm(
+    stroke ~ .
+    , data = data_train
+    , family = binomial(link = 'logit')
+    , weights = ifelse(data_train$stroke == 1, weights[i] , 1)
+  )
+  
+  y_hat_prob = predict(
+    model
+    , newdata = data_test
+    , type = 'response'
+  )
+  
+  y_true = data_test$stroke %>%
+    as.factor()
+  
+  y_hat = ifelse(y_hat_prob > 0.5, 1, 0) %>%
+    as.factor()
+  
+  
+  cont_matrix = matrix(0, nrow = 2, ncol = 2, dimnames = list(c('0', '1'), c('0', '1')))
+  
+  #Macierz kontyngencji
+  temp_matrix = table(y_true, y_hat)
+  
+  # Obliczanie metryk
+  cont_matrix[rownames(temp_matrix), colnames(temp_matrix)] = temp_matrix
+  sensitivity[i] = cont_matrix[2,2] / sum(cont_matrix[2,])
+  auc[i] = as.numeric(pROC::auc(y_true, y_hat_prob))
+}
+
+#wykres sensitivity od weights
+plot(x = weights, y = sensitivity)
+#wykres auc od weights
+plot(x = weights, y = auc)
+
+```
+
+Zależy mi na znalezieniu możliwie największej liczby osób z udarem, zatem ostatecznie wybieram model, dla którego metryka sensitivity wynosi około 0.85. Skupiam się na tej metryce, ponieważ mówi ona ile spośród wszystkich chorych w zbiorze udało się dobrze sklasyfikować (TP/P).
+
+```{r}
+p = length(weights) - length(weights[which(sensitivity > 0.85)])
+
+model = glm(
+  stroke ~ .
+  , data = data_train
+  , family = binomial(link = 'logit')
+  , weights = ifelse(data_train$stroke == 1, weights[p] , 1)
+)
+
+summary(model)
+
+y_hat_prob = predict(
+  model
+  , newdata = data_test
+  , type = 'response'
+)
+
+confusionMatrix(as.factor(ifelse(y_hat_prob > 0.5, 1, 0)), data_test$stroke, positive = "1")
+```
+
+## Drzewa decyzyjne
+
+Drugim modelem, który wybrałem są drzewa decyzyjne. Ponownie sprawdźmy jak będzie wyglądał model na surowych danych.
+
+```{r}
+model_tree <- rpart(stroke ~ ., 
+                    data = data_train,
+                    weights = ifelse(data_train$stroke == 1, 1, 1))  
+
+summary(model_tree)
+
+
+# Wizualizacja drzewa za pomocą funkcji prp i rpart.plot
+prp(model_tree)
+#rpart.plot(model_tree)
+
+#predykcja
+predictions <- predict(model_tree, newdata = data_test, type = "class")
+
+
+confusionMatrix(predictions, data_test$stroke, positive = "1")
+
+```
+
+Znowu otrzymujemy model, który klasyfikuje wszystkich jako zdrowych. Sprawdźmy, czy zastosowanie wag pomoże uzyskać sensowniejsze wyniki.
+
+```{r}
+evaluate_model <- function(weights) {
+  model <- rpart(stroke ~ ., data = data_train, weights = weights)
+  
+  predictions <- predict(model, newdata = data_test, type = "class")
+  
+  # Obliczenie metryk jakościowych
+  confusion_matrix <- confusionMatrix(predictions, data_test$stroke, positive = "1")
+  #confusion_matrix
+  precision <- confusion_matrix$byClass['Pos Pred Value']
+  recall <- confusion_matrix$byClass['Sensitivity']
+  # Obliczenie F1 Score
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+  
+  return(c(recall, precision, f1_score))
+}
+
+# Lista różnych zestawów wag do przetestowania
+rm(weight_options)
+weight_options <- list(
+  rep(1, nrow(data_train)),                         
+  ifelse(data_train$stroke == 1, 10, 1),            
+  ifelse(data_train$stroke == 1, 20, 1),
+  ifelse(data_train$stroke == 1, 25, 1),
+  ifelse(data_train$stroke == 1, 26.5, 1),         
+  ifelse(data_train$stroke == 1, 28, 1)
+)
+
+# Macierz do przechowywania wyników
+results <- data.frame(Weight_Set = character(), Recall = numeric(), Precision = numeric(), F1_Score = numeric(), stringsAsFactors = FALSE)
+
+# Pętla przez zestawy wag
+for (i in seq_along(weight_options)) {
+  weights <- weight_options[[i]]
+  metrics <- evaluate_model(weights)
+  # Dodanie wyników do macierzy
+  results <- rbind(results, data.frame(Weight_Set = paste("Set", i), Recall = metrics[1], Precision = metrics[2], F1_Score = metrics[3]))
+}
+
+# Wyświetlenie wyników
+print(results)
+
+```
+
+Sprawdźmy jak wyglądają drzewa dla wag 20, 25, 26.5 i 28.
+
+```{r}
+model_tree_20 <- rpart(stroke ~ ., data = data_train, weights = ifelse(data_train$stroke == 1, 20, 1))
+prp(model_tree_20)
+#rpart.plot(model_tree_265)
+
+predictions_20 <- predict(model_tree_20, newdata = data_test, type = "class")
+confusion_matrix_20 <- confusionMatrix(predictions_20, data_test$stroke, positive = "1")
+print(confusion_matrix_20)
+```
+
+```{r}
+model_tree_25 <- rpart(stroke ~ ., data = data_train, weights = ifelse(data_train$stroke == 1, 25, 1))
+prp(model_tree_25)
+#rpart.plot(model_tree_265)
+
+predictions_25 <- predict(model_tree_25, newdata = data_test, type = "class")
+confusion_matrix_25 <- confusionMatrix(predictions_25, data_test$stroke, positive = "1")
+print(confusion_matrix_25)
+```
+
+```{r}
+model_tree_265 <- rpart(stroke ~ ., data = data_train, weights = ifelse(data_train$stroke == 1, 26.5, 1))
+prp(model_tree_265)
+#rpart.plot(model_tree_265)
+
+predictions_265 <- predict(model_tree_265, newdata = data_test, type = "class")
+confusion_matrix_265 <- confusionMatrix(predictions_265, data_test$stroke, positive = "1")
+print(confusion_matrix_265)
+```
+
+```{r}
+model_tree_28 <- rpart(stroke ~ ., data = data_train, weights = ifelse(data_train$stroke == 1, 28, 1))
+prp(model_tree_28)
+#rpart.plot(model_tree_265)
+
+predictions_28 <- predict(model_tree_28, newdata = data_test, type = "class")
+confusion_matrix_28 <- confusionMatrix(predictions_28, data_test$stroke, positive = "1")
+print(confusion_matrix_28)
+```
+
+Zauważmy, że stosunkowo niewielka różnica w wagach powoduje poważne zmiany w budowie drzew. Porównując te modele klasyczną metodą "na oko", możemy przyjąć, że ten z wagą 20 będzie najbardziej uniwersalny.
+
+## Model MARS
+
+Jako trzeci model wybieram model MARS, ponieważ jego idea polega on na połączeniu splajnów i regresji wielowymiarowej, co pozwala na uwzględnieniu np. wieku do kwadratu, a czego nie brały pod uwagę drzewa losowe i regresja logistyczna. Zarazem jego implementacja w R jest stosunkowo prosta dzięki bibliotece earth.
+
+Standardowo, zobaczmy co dostaniemy jak model zbudujemy na surowych danych.
+
+```{r}
+#budowa modelu
+#parametr degree oznacza stopnie interakcji - maksymalna ilość zmiennych, dla których badamy interakcję
+#parametr nprune - przedział, w krórym zawiera się ilość funkcji bazowych, na których jest zbudowany model 
+model_mars <- caret::train(
+  stroke ~ .
+  , data = data_train
+  , method = 'earth'
+  , trControl = trainControl(method = 'cv', number = 5) 
+  , tuneGrid = expand.grid(
+    degree = 1:3
+    , nprune = seq(5, 20, by = 2)
+  )
+)
+
+ggplot(model_mars)
+model_mars$bestTune #najlepsze parametry
+
+y_hat = predict(model_mars, newdata = data_test)
+confusionMatrix(data = y_hat, reference = data_test$stroke, positive = "1")
+```
+
+Bez zaskoczenia okazuje się, że dostajemy model klasyfikujący wszystkich jako zdrowych. Korzystając z modelu MARS nie można bezpośrednio zastosować wag, więc posłużyłem się oversamplingiem w celu zbalansowania danych.
+
+```{r}
+#oversampling
+set.seed(213)
+data_balanced <- upSample(x = data_train[, -which(names(data_train) == "stroke")], 
+                          y = data_train$stroke)
+
+model_mars_ovsam <- caret::train(
+  Class ~ .
+  , data = data_balanced
+  , method = 'earth'
+  , trControl = trainControl(method = 'cv', number = 5)
+  , tuneGrid = expand.grid(
+    degree = 1:3
+    , nprune = seq(5, 25, by = 2)
+  )
+)
+
+ggplot(model_mars_ovsam)
+model_mars_ovsam$bestTune
+
+y_hat_mars = predict(model_mars_ovsam, newdata = data_test)
+confusionMatrix(data = y_hat_mars, reference = data_test$stroke, positive = "1")
+```
+
+Otrzymaliśmy model, który zmaksymalizował Accuracy, ale kosztem Sensitivity. Możemy porównać go z drzewem z wagą 10, które po każdym względem jest lepsze...
+
+```{r}
+model_tree_10 <- rpart(stroke ~ ., data = data_train, weights = ifelse(data_train$stroke == 1, 10, 1))
+prp(model_tree_10)
+#rpart.plot(model_tree_10)
+
+predictions_10 <- predict(model_tree_10, newdata = data_test, type = "class")
+confusion_matrix_10 <- confusionMatrix(predictions_10, data_test$stroke, positive = "1")
+print(confusion_matrix_10)
+```
+
+## Podsumowanie
+
+![](wyniki.png)
